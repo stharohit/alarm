@@ -78,7 +78,13 @@ object AlarmScheduler {
             )
             true
         } else {
-            armAlarmManager(context, intent, alarm.dateTime.time, alarm.id)
+            armAlarmManager(
+                context,
+                intent,
+                alarm.dateTime.time,
+                alarm.id,
+                alarm.androidFullScreenIntent,
+            )
         }
 
         // Every path that adds a pending alarm has to leave the kill warning
@@ -101,6 +107,7 @@ object AlarmScheduler {
         intent: Intent,
         triggerTimeMillis: Long,
         id: Int,
+        asAlarmClock: Boolean,
     ): Boolean {
         return try {
             val pendingIntent = PendingIntent.getBroadcast(
@@ -116,7 +123,13 @@ object AlarmScheduler {
                 return false
             }
 
-            setExactAlarm(alarmManager, triggerTimeMillis, pendingIntent)
+            setExactAlarm(
+                context,
+                asAlarmClock,
+                alarmManager,
+                triggerTimeMillis,
+                pendingIntent,
+            )
             true
         } catch (e: IllegalStateException) {
             // Reporting this as "service not available" was misleading: a missing
@@ -137,6 +150,8 @@ object AlarmScheduler {
     }
 
     private fun setExactAlarm(
+        context: Context,
+        asAlarmClock: Boolean,
         alarmManager: AlarmManager,
         triggerTimeMillis: Long,
         pendingIntent: PendingIntent,
@@ -159,6 +174,38 @@ object AlarmScheduler {
                 pendingIntent
             )
             return
+        }
+
+        // An alarm that takes over the screen to wake someone IS the user's
+        // alarm clock, and saying so changes how the platform treats it: exempt
+        // from Doze, surfaced through getNextAlarmClock(), and — the reason
+        // that matters — the same call every OEM's own clock app makes, which
+        // is why aggressive battery managers leave these alone while they drop
+        // setExactAndAllowWhileIdle alarms. Deliberately AFTER the
+        // revoked-permission fallback above: a late alarm still beats none.
+        if (asAlarmClock) {
+            val showIntent = context.packageManager
+                .getLaunchIntentForPackage(context.packageName)
+                ?.let {
+                    PendingIntent.getActivity(
+                        context,
+                        0,
+                        it,
+                        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                    )
+                }
+
+            try {
+                alarmManager.setAlarmClock(
+                    AlarmManager.AlarmClockInfo(triggerTimeMillis, showIntent),
+                    pendingIntent
+                )
+                return
+            } catch (e: SecurityException) {
+                // Same defence as the exact path below: fall through to it
+                // rather than leaving the alarm unarmed.
+                Log.e(TAG, "setAlarmClock rejected; falling back to an exact alarm", e)
+            }
         }
 
         try {
